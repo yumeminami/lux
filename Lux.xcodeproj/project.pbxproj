@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0EE17E712EF47EAD0022B258 /* libzstd in Frameworks */ = {isa = PBXBuildFile; productRef = 0EE17E702EF47EAD0022B258 /* libzstd */; };
+		0EE17E742EF47EDA0022B258 /* MCAP in Frameworks */ = {isa = PBXBuildFile; productRef = 0EE17E732EF47EDA0022B258 /* MCAP */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		0ECC22A72EF43E1400960255 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +57,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0EE17E712EF47EAD0022B258 /* libzstd in Frameworks */,
+				0EE17E742EF47EDA0022B258 /* MCAP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +119,8 @@
 			);
 			name = Lux;
 			packageProductDependencies = (
+				0EE17E702EF47EAD0022B258 /* libzstd */,
+				0EE17E732EF47EDA0022B258 /* MCAP */,
 			);
 			productName = Lux;
 			productReference = 0ECC22992EF43E1100960255 /* Lux.app */;
@@ -195,6 +204,10 @@
 			);
 			mainGroup = 0ECC22902EF43E1100960255;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				0EE17E6F2EF47EAD0022B258 /* XCLocalSwiftPackageReference "ThirdParty/zstd" */,
+				0EE17E722EF47EDA0022B258 /* XCLocalSwiftPackageReference "ThirdParty/mcap" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0ECC229A2EF43E1100960255 /* Products */;
 			projectDirPath = "";
@@ -574,6 +587,28 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		0EE17E6F2EF47EAD0022B258 /* XCLocalSwiftPackageReference "ThirdParty/zstd" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ThirdParty/zstd;
+		};
+		0EE17E722EF47EDA0022B258 /* XCLocalSwiftPackageReference "ThirdParty/mcap" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ThirdParty/mcap;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0EE17E702EF47EAD0022B258 /* libzstd */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = libzstd;
+		};
+		0EE17E732EF47EDA0022B258 /* MCAP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MCAP;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 0ECC22912EF43E1100960255 /* Project object */;
 }

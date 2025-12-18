@@ -74,7 +74,8 @@ class ARSessionManager: NSObject, ObservableObject {
             currentSessionPath = sessionFolder
 
             // 创建MCAP writer
-            mcapWriter = try MCAPWriter(fileURL: mcapFile)
+            let writer = try MCAPWriter(fileURL: mcapFile)
+            mcapWriter = writer
 
             // 定义Schema (JSON格式)
             let schemaJSON = """
@@ -103,13 +104,29 @@ class ARSessionManager: NSObject, ObservableObject {
                 }
             }
             """
-            mcapWriter?.writeSchema(name: "ARPose", encoding: "jsonschema", schemaData: schemaJSON.data(using: .utf8)!)
-            mcapWriter?.writeChannel(topic: "/ar/pose", messageEncoding: "json", schemaId: 1)
 
-            recordingStartTime = Date()
-            frameCount = 0
-            isRecording = true
-            print("开始录制MCAP: \(mcapFile.path)")
+            // 异步初始化 MCAP writer - 完成后才开始录制
+            Task {
+                await writer.start(library: "Lux", profile: "")
+                let schemaId = await writer.addSchema(
+                    name: "ARPose",
+                    encoding: "jsonschema",
+                    data: schemaJSON.data(using: .utf8)!
+                )
+                await writer.addChannel(
+                    topic: "/ar/pose",
+                    schemaId: schemaId,
+                    messageEncoding: "json"
+                )
+
+                // 初始化完成后才开始录制
+                DispatchQueue.main.async {
+                    self.recordingStartTime = Date()
+                    self.frameCount = 0
+                    self.isRecording = true
+                    print("开始录制MCAP: \(mcapFile.path)")
+                }
+            }
         } catch {
             print("创建MCAP录制失败: \(error)")
         }
@@ -121,9 +138,11 @@ class ARSessionManager: NSObject, ObservableObject {
 
         fileQueue.async { [weak self] in
             guard let self = self else { return }
-            self.mcapWriter?.close()
-            self.mcapWriter = nil
-            print("MCAP录制完成")
+            Task {
+                await self.mcapWriter?.close()
+                self.mcapWriter = nil
+                print("MCAP录制完成")
+            }
         }
     }
     
@@ -227,7 +246,13 @@ extension ARSessionManager: ARSessionDelegate {
                 if let jsonData = try? JSONSerialization.data(withJSONObject: message) {
                     // 时间戳转换为纳秒
                     let timestampNanos = UInt64(timestamp * 1_000_000_000)
-                    self.mcapWriter?.writeMessage(timestamp: timestampNanos, channelId: 1, messageData: jsonData)
+                    Task {
+                        await self.mcapWriter?.writeMessage(
+                            topic: "/ar/pose",
+                            data: jsonData,
+                            logTime: timestampNanos
+                        )
+                    }
                 }
             }
         }

@@ -6,145 +6,241 @@
 //
 
 import Foundation
+import MCAP
+import Compression
 
-class MCAPWriter {
+/// File writer that conforms to MCAP's IWritable protocol
+private class FileWriter: IWritable {
     private var fileHandle: FileHandle?
-    private let fileURL: URL
-    private var channelId: UInt16 = 1
-    private var messageCount: UInt64 = 0
+    private var bytesWritten: UInt64 = 0
+    private let queue = DispatchQueue(label: "com.lux.mcap.filewriter")
 
-    init(fileURL: URL) throws {
-        self.fileURL = fileURL
-
-        // 创建文件
-        FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-        fileHandle = try FileHandle(forWritingTo: fileURL)
-
-        // 写入MCAP Header
-        writeHeader()
+    init(fileHandle: FileHandle) {
+        self.fileHandle = fileHandle
     }
 
-    deinit {
-        close()
+    func position() -> UInt64 {
+        bytesWritten
     }
 
-    func writeHeader() {
-        guard let handle = fileHandle else { return }
+    func write(_ data: Data) async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                guard let handle = self.fileHandle else {
+                    continuation.resume()
+                    return
+                }
 
-        // MCAP magic bytes
-        let magic = Data([0x89, 0x4D, 0x43, 0x41, 0x50, 0x30, 0x0D, 0x0A])
-        handle.write(magic)
-
-        // Header record
-        writeRecord(opcode: 0x01, data: Data())
-    }
-
-    func writeSchema(name: String, encoding: String, schemaData: Data) {
-        var data = Data()
-
-        // Schema ID (2 bytes)
-        data.append(UInt16(1).littleEndianData)
-
-        // Name length + name
-        data.append(UInt32(name.utf8.count).littleEndianData)
-        data.append(name.data(using: .utf8)!)
-
-        // Encoding length + encoding
-        data.append(UInt32(encoding.utf8.count).littleEndianData)
-        data.append(encoding.data(using: .utf8)!)
-
-        // Schema data length + data
-        data.append(UInt32(schemaData.count).littleEndianData)
-        data.append(schemaData)
-
-        writeRecord(opcode: 0x03, data: data)
-    }
-
-    func writeChannel(topic: String, messageEncoding: String, schemaId: UInt16) {
-        var data = Data()
-
-        // Channel ID (2 bytes)
-        data.append(channelId.littleEndianData)
-
-        // Schema ID (2 bytes)
-        data.append(schemaId.littleEndianData)
-
-        // Topic length + topic
-        data.append(UInt32(topic.utf8.count).littleEndianData)
-        data.append(topic.data(using: .utf8)!)
-
-        // Message encoding length + encoding
-        data.append(UInt32(messageEncoding.utf8.count).littleEndianData)
-        data.append(messageEncoding.data(using: .utf8)!)
-
-        // Metadata (empty map)
-        data.append(UInt32(0).littleEndianData)
-
-        writeRecord(opcode: 0x04, data: data)
-    }
-
-    func writeMessage(timestamp: UInt64, channelId: UInt16, messageData: Data) {
-        var data = Data()
-
-        // Channel ID
-        data.append(channelId.littleEndianData)
-
-        // Sequence (4 bytes)
-        data.append(UInt32(messageCount).littleEndianData)
-
-        // Log time (8 bytes, nanoseconds)
-        data.append(timestamp.littleEndianData)
-
-        // Publish time (same as log time)
-        data.append(timestamp.littleEndianData)
-
-        writeRecord(opcode: 0x05, data: data + messageData)
-        messageCount += 1
+                do {
+                    try handle.write(contentsOf: data)
+                    try handle.synchronize()
+                    self.bytesWritten += UInt64(data.count)
+                    continuation.resume()
+                } catch {
+                    print("Failed to write to file: \(error)")
+                    continuation.resume()
+                }
+            }
+        }
     }
 
     func close() {
-        guard let handle = fileHandle else { return }
-
-        // Write footer
-        writeRecord(opcode: 0x02, data: Data())
-
-        // Write magic bytes again
-        let magic = Data([0x89, 0x4D, 0x43, 0x41, 0x50, 0x30, 0x0D, 0x0A])
-        handle.write(magic)
-
-        try? handle.close()
-        fileHandle = nil
-    }
-
-    private func writeRecord(opcode: UInt8, data: Data) {
-        guard let handle = fileHandle else { return }
-
-        var record = Data()
-        record.append(opcode)
-        record.append(UInt64(data.count).littleEndianData)
-        record.append(data)
-
-        handle.write(record)
+        queue.sync {
+            try? fileHandle?.synchronize()
+            try? fileHandle?.close()
+            fileHandle = nil
+        }
     }
 }
 
-extension UInt16 {
-    var littleEndianData: Data {
-        var value = self.littleEndian
-        return Data(bytes: &value, count: MemoryLayout<UInt16>.size)
-    }
-}
+/// Wrapper around MCAP Swift library for easy file writing
+class MCAPWriter {
+    private let writer: MCAP.MCAPWriter
+    private let fileWriter: FileWriter
+    private let fileURL: URL
 
-extension UInt32 {
-    var littleEndianData: Data {
-        var value = self.littleEndian
-        return Data(bytes: &value, count: MemoryLayout<UInt32>.size)
-    }
-}
+    private var channelIdMap: [String: ChannelID] = [:]
+    private var schemaIdMap: [String: SchemaID] = [:]
+    private var messageSequence: UInt32 = 0
+    private var isInitialized = false
 
-extension UInt64 {
-    var littleEndianData: Data {
-        var value = self.littleEndian
-        return Data(bytes: &value, count: MemoryLayout<UInt64>.size)
+    init(fileURL: URL, useCompression: Bool = true) throws {
+        self.fileURL = fileURL
+
+        // Create file
+        FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+        let fileHandle = try FileHandle(forWritingTo: fileURL)
+
+        self.fileWriter = FileWriter(fileHandle: fileHandle)
+
+        // Configure options with compression
+        var options = MCAP.MCAPWriter.Options()
+        if useCompression {
+            options = MCAP.MCAPWriter.Options(
+                useStatistics: true,
+                useSummaryOffsets: true,
+                useChunks: true,
+                repeatSchemas: true,
+                repeatChannels: true,
+                useAttachmentIndex: true,
+                useMetadataIndex: true,
+                useMessageIndex: true,
+                useChunkIndex: true,
+                startChannelID: 0,
+                chunkSize: 1024 * 1024, // 1MB chunks
+                compressChunk: Self.compressWithLZ4
+            )
+        }
+
+        self.writer = MCAP.MCAPWriter(fileWriter, options)
+    }
+
+    // MARK: - Compression
+
+    nonisolated private static func compressWithLZ4(data: Data) -> (compression: String, compressedData: Data) {
+        let sourceBuffer = [UInt8](data)
+        let destinationBufferSize = sourceBuffer.count
+        var destinationBuffer = [UInt8](repeating: 0, count: destinationBufferSize)
+
+        let compressedSize = compression_encode_buffer(
+            &destinationBuffer,
+            destinationBufferSize,
+            sourceBuffer,
+            sourceBuffer.count,
+            nil,
+            COMPRESSION_LZ4
+        )
+
+        if compressedSize > 0 && compressedSize < sourceBuffer.count {
+            // Compression successful and reduced size
+            return ("lz4", Data(destinationBuffer.prefix(compressedSize)))
+        } else {
+            // Compression failed or didn't reduce size, return original
+            return ("", data)
+        }
+    }
+
+    nonisolated private static func compressWithLZFSE(data: Data) -> (compression: String, compressedData: Data) {
+        let sourceBuffer = [UInt8](data)
+        let destinationBufferSize = compression_encode_scratch_buffer_size(COMPRESSION_LZFSE)
+        var destinationBuffer = [UInt8](repeating: 0, count: destinationBufferSize)
+
+        let compressedSize = compression_encode_buffer(
+            &destinationBuffer,
+            destinationBufferSize,
+            sourceBuffer,
+            sourceBuffer.count,
+            nil,
+            COMPRESSION_LZFSE
+        )
+
+        if compressedSize > 0 && compressedSize < sourceBuffer.count {
+            // Compression successful and reduced size
+            return ("lz4", Data(destinationBuffer.prefix(compressedSize)))
+        } else {
+            // Compression failed or didn't reduce size, return original
+            return ("", data)
+        }
+    }
+
+    deinit {
+        fileWriter.close()
+    }
+
+    /// Start writing the MCAP file - MUST be called before adding schemas/channels
+    func start(library: String = "Lux", profile: String = "") async {
+        await writer.start(library: library, profile: profile)
+        isInitialized = true
+    }
+
+    /// Add a schema and return its ID
+    @discardableResult
+    func addSchema(name: String, encoding: String, data: Data) async -> SchemaID {
+        if let existingId = schemaIdMap[name] {
+            return existingId
+        }
+
+        let schemaId = await writer.addSchema(name: name, encoding: encoding, data: data)
+        schemaIdMap[name] = schemaId
+        return schemaId
+    }
+
+    /// Add a channel and return its ID
+    @discardableResult
+    func addChannel(
+        topic: String,
+        schemaId: SchemaID,
+        messageEncoding: String,
+        metadata: [String: String] = [:]
+    ) async -> ChannelID {
+        if let existingId = channelIdMap[topic] {
+            return existingId
+        }
+
+        let channelId = await writer.addChannel(
+            schemaID: schemaId,
+            topic: topic,
+            messageEncoding: messageEncoding,
+            metadata: metadata
+        )
+        channelIdMap[topic] = channelId
+        return channelId
+    }
+
+    /// Write a message to a channel
+    func writeMessage(
+        channelId: ChannelID,
+        data: Data,
+        logTime: UInt64? = nil,
+        publishTime: UInt64? = nil
+    ) async {
+        guard isInitialized else {
+            print("Warning: Writer not initialized, call start() first")
+            return
+        }
+
+        let timestamp = logTime ?? UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
+
+        let message = Message(
+            channelID: channelId,
+            sequence: messageSequence,
+            logTime: timestamp,
+            publishTime: publishTime ?? timestamp,
+            data: data
+        )
+
+        await writer.addMessage(message)
+        messageSequence += 1
+    }
+
+    /// Convenience method: write message using topic name
+    func writeMessage(
+        topic: String,
+        data: Data,
+        logTime: UInt64? = nil,
+        publishTime: UInt64? = nil
+    ) async {
+        guard isInitialized else {
+            print("Warning: Writer not initialized, call start() first")
+            return
+        }
+
+        guard let channelId = channelIdMap[topic] else {
+            print("Warning: Channel not found for topic '\(topic)'")
+            return
+        }
+
+        await writeMessage(
+            channelId: channelId,
+            data: data,
+            logTime: logTime,
+            publishTime: publishTime
+        )
+    }
+
+    /// Finalize and close the MCAP file
+    func close() async {
+        await writer.end()
+        fileWriter.close()
     }
 }

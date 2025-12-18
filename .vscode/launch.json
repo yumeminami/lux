@@ -1,0 +1,22 @@
+{
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:Lux}/ThirdParty/mcap",
+      "name": "Debug conformance (ThirdParty/mcap)",
+      "program": "${workspaceFolder:Lux}/ThirdParty/mcap/.build/debug/conformance",
+      "preLaunchTask": "swift: Build Debug conformance (ThirdParty/mcap)"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:Lux}/ThirdParty/mcap",
+      "name": "Release conformance (ThirdParty/mcap)",
+      "program": "${workspaceFolder:Lux}/ThirdParty/mcap/.build/release/conformance",
+      "preLaunchTask": "swift: Build Release conformance (ThirdParty/mcap)"
+    }
+  ]
+}

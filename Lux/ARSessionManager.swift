@@ -12,7 +12,7 @@ class ARSessionManager: NSObject, ObservableObject {
     @Published var position: SIMD3<Float> = .zero
     @Published var rotation: SIMD3<Float> = .zero
 
-    private let session = ARSession()
+    let session = ARSession()
     private var absolutePosition: SIMD3<Float> = .zero
     private var absoluteRotation: SIMD3<Float> = .zero
     private var referencePosition: SIMD3<Float> = .zero

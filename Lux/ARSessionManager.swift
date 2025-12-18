@@ -33,17 +33,30 @@ class ARSessionManager: NSObject, ObservableObject {
     private var mcapWriter: MCAPWriter?
     private var frameCount = 0
     private let fileQueue = DispatchQueue(label: "com.lux.fileQueue", qos: .utility)
+    
+    // 性能优化：延迟初始化 CIContext（懒加载）
+    private lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    // 频率控制：记录上一次录制和 UI 更新的时间戳
+    private var lastRecordTimestamp: TimeInterval = 0
+    private var lastUIUpdateTimestamp: TimeInterval = 0
+    private let recordInterval: TimeInterval = 1.0 / 60.0 // 录制 60Hz
+    private let uiUpdateInterval: TimeInterval = 1.0 / 30.0 // UI 更新 30Hz
 
     override init() {
         super.init()
         session.delegate = self
-        startSession()
+        // 延迟启动，避免阻塞主线程
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.startSession()
+        }
     }
 
     func startSession() {
         let configuration = ARWorldTrackingConfiguration()
-        configuration.isAutoFocusEnabled = true 
-        session.run(configuration)
+        configuration.isAutoFocusEnabled = true
+
+        session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     }
     
     func reset() {
@@ -74,10 +87,11 @@ class ARSessionManager: NSObject, ObservableObject {
             currentSessionPath = sessionFolder
 
             // 创建MCAP writer
+            // 注意：确保您的 MCAPWriter 实现支持该初始化方法
             let writer = try MCAPWriter(fileURL: mcapFile)
             mcapWriter = writer
 
-            // 定义Schema (JSON格式)
+            // 定义Schema (JSON格式) - 不包含图片数据
             let schemaJSON = """
             {
                 "type": "object",
@@ -99,8 +113,7 @@ class ARSessionManager: NSObject, ObservableObject {
                             "pitch": {"type": "number"},
                             "yaw": {"type": "number"}
                         }
-                    },
-                    "image": {"type": "string", "description": "base64 encoded JPEG"}
+                    }
                 }
             }
             """
@@ -123,6 +136,7 @@ class ARSessionManager: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.recordingStartTime = Date()
                     self.frameCount = 0
+                    self.lastRecordTimestamp = 0 // 重置时间戳
                     self.isRecording = true
                     print("开始录制MCAP: \(mcapFile.path)")
                 }
@@ -147,7 +161,6 @@ class ARSessionManager: NSObject, ObservableObject {
     }
     
     // MARK: - 内部辅助函数：计算欧拉角
-    // 直接放在类内部，避免 extension 找不到的问题
     private func extractEulerAngles(from matrix: simd_float3x3) -> SIMD3<Float> {
         // matrix[col][row]
         let pitch = atan2(-matrix[2][1], sqrt(matrix[2][0] * matrix[2][0] + matrix[2][2] * matrix[2][2]))
@@ -156,17 +169,32 @@ class ARSessionManager: NSObject, ObservableObject {
         return SIMD3<Float>(pitch, yaw, roll)
     }
 
-    // MARK: - 内部辅助函数：将图片转换为base64
+    // MARK: - 内部辅助函数：缩放并转Base64
     private func pixelBufferToBase64(_ pixelBuffer: CVPixelBuffer) -> String {
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext()
+        var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        
+        // 1. 图像缩放逻辑 (目标 640x480)
+        let targetWidth: CGFloat = 640.0
+        let targetHeight: CGFloat = 480.0
+        
+        // 计算缩放比例
+        let scaleX = targetWidth / CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let scaleY = targetHeight / CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        
+        // 使用 transform 进行缩放
+        // 注意：这里假设源图像比例与4:3接近，直接缩放可能导致拉伸。
+        // 如需保持比例裁剪，逻辑会更复杂，这里按您的需求直接 Resize。
+        let transform = CGAffineTransform(scaleX: scaleX, y: scaleY)
+        ciImage = ciImage.transformed(by: transform)
 
+        // 2. 转换 JPEG
         if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) {
             let options: [CIImageRepresentationOption: Any] = [
                 CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.5
             ]
-
-            if let jpegData = context.jpegRepresentation(of: ciImage, colorSpace: colorSpace, options: options) {
+            
+            // 使用复用的 ciContext 提高性能
+            if let jpegData = ciContext.jpegRepresentation(of: ciImage, colorSpace: colorSpace, options: options) {
                 return jpegData.base64EncodedString()
             }
         }
@@ -179,7 +207,7 @@ extension ARSessionManager: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let transform = frame.camera.transform
 
-        // 1. 提取位置
+        // 1. 提取位置 (保持 UI 60Hz 更新，不进行降频)
         let arkitX = transform.columns.3.x
         let arkitY = transform.columns.3.y
         let arkitZ = transform.columns.3.z
@@ -194,41 +222,47 @@ extension ARSessionManager: ARSessionDelegate {
             SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
         )
         
-        // 使用内部函数计算欧拉角 (Pitch, Yaw, Roll)
         let arkitEuler = extractEulerAngles(from: rotationMatrix)
-        
-        // 转换到机器人坐标系
         absoluteRotation = SIMD3<Float>(-arkitEuler.z, -arkitEuler.x, arkitEuler.y)
         
-        // 计算相对 Pose
         let relPos = absolutePosition - referencePosition
         let relRot = absoluteRotation - referenceRotation
-        
-        // 更新 UI
-        DispatchQueue.main.async {
-            self.position = relPos
-            self.rotation = relRot
-            if self.isRecording, let start = self.recordingStartTime {
-                self.recordDuration = Date().timeIntervalSince(start)
+
+        // 更新 UI (限制为 30Hz，减少主线程负载)
+        let currentTime = frame.timestamp
+        if currentTime - lastUIUpdateTimestamp >= uiUpdateInterval {
+            lastUIUpdateTimestamp = currentTime
+            DispatchQueue.main.async {
+                self.position = relPos
+                self.rotation = relRot
+                if self.isRecording, let start = self.recordingStartTime {
+                    self.recordDuration = Date().timeIntervalSince(start)
+                }
             }
         }
         
-        // 3. 录制数据到MCAP
+        // 3. 录制数据到 MCAP (降频处理 60 Hz)
         if isRecording {
-            let timestamp = frame.timestamp
+            let arFrameTimestamp = frame.timestamp
+
+            // 降频逻辑：如果距离上次录制时间不足 1/60 秒，则跳过
+            if arFrameTimestamp - lastRecordTimestamp < recordInterval {
+                return
+            }
+            lastRecordTimestamp = arFrameTimestamp
+
+            // 使用 Unix 时间戳 (秒)
+            let unixTimestamp = Date().timeIntervalSince1970
+
             let currentFrameIndex = frameCount
             frameCount += 1
-            let pixelBuffer = frame.capturedImage
 
             fileQueue.async { [weak self] in
                 guard let self = self else { return }
 
-                // 将图片转换为JPEG base64
-                let imageBase64 = self.pixelBufferToBase64(pixelBuffer)
-
-                // 构建JSON消息
+                // 构建JSON消息 (不包含图片)
                 let message: [String: Any] = [
-                    "timestamp": timestamp,
+                    "timestamp": unixTimestamp,
                     "frame_index": currentFrameIndex,
                     "position": [
                         "x": relPos.x,
@@ -239,18 +273,18 @@ extension ARSessionManager: ARSessionDelegate {
                         "roll": relRot.x,
                         "pitch": relRot.y,
                         "yaw": relRot.z
-                    ],
-                    "image": imageBase64
+                    ]
                 ]
 
                 if let jsonData = try? JSONSerialization.data(withJSONObject: message) {
-                    // 时间戳转换为纳秒
-                    let timestampNanos = UInt64(timestamp * 1_000_000_000)
+                    // Unix 时间戳转换为纳秒
+                    let timestampNanos = UInt64(unixTimestamp * 1_000_000_000)
                     Task {
                         await self.mcapWriter?.writeMessage(
                             topic: "/ar/pose",
                             data: jsonData,
-                            logTime: timestampNanos
+                            logTime: timestampNanos,
+                            publishTime: timestampNanos
                         )
                     }
                 }

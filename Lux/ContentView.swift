@@ -16,7 +16,7 @@ struct ContentView: View {
         TabView {
             HomeView(isFullScreen: $isFullScreen)
                 .tabItem {
-                    Label("监控", systemImage: "camera.viewfinder")
+                    Label("采集", systemImage: "camera.viewfinder")
                 }
                 .toolbar(isFullScreen ? .hidden : .visible, for: .tabBar)
 

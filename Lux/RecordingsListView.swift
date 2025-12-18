@@ -59,21 +59,46 @@ class RecordingsViewModel: ObservableObject {
         }
     }
 
-    func shareRecording(_ recording: Recording) -> URL {
-        return recording.url.appendingPathComponent("recording.mcap")
+    func deleteAll() {
+        recordings.forEach { recording in
+            try? FileManager.default.removeItem(at: recording.url)
+        }
+        recordings.removeAll()
+    }
+
+    func shareRecording(_ recording: Recording) -> URL? {
+        // 将文件复制到临时目录并使用时间戳命名
+        let sourceFile = recording.url.appendingPathComponent("recording.mcap")
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileName = "\(recording.name).mcap"
+        let destFile = tempDir.appendingPathComponent(fileName)
+
+        do {
+            // 删除旧的临时文件（如果存在）
+            try? FileManager.default.removeItem(at: destFile)
+            // 复制文件
+            try FileManager.default.copyItem(at: sourceFile, to: destFile)
+            return destFile
+        } catch {
+            print("准备分享文件失败: \(error)")
+            return nil
+        }
     }
 }
 
 struct RecordingsListView: View {
     @StateObject private var viewModel = RecordingsViewModel()
     @State private var sharingItem: URL?
+    @State private var showDeleteAllAlert = false
 
     var body: some View {
         NavigationView {
             List {
                 ForEach(viewModel.recordings) { recording in
                     RecordingRow(recording: recording, onShare: {
-                        sharingItem = viewModel.shareRecording(recording)
+                        if let url = viewModel.shareRecording(recording) {
+                            sharingItem = url
+                        }
                     })
                 }
                 .onDelete { indexSet in
@@ -84,10 +109,30 @@ struct RecordingsListView: View {
             }
             .navigationTitle("数据包")
             .toolbar {
-                EditButton()
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if !viewModel.recordings.isEmpty {
+                        Button(role: .destructive) {
+                            showDeleteAllAlert = true
+                        } label: {
+                            Label("删除全部", systemImage: "trash")
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    EditButton()
+                }
             }
             .refreshable {
                 viewModel.loadRecordings()
+            }
+            .alert("确认删除", isPresented: $showDeleteAllAlert) {
+                Button("取消", role: .cancel) {}
+                Button("删除全部", role: .destructive) {
+                    viewModel.deleteAll()
+                }
+            } message: {
+                Text("确定要删除所有 \(viewModel.recordings.count) 个数据包吗？此操作不可恢复。")
             }
             .sheet(item: Binding(
                 get: { sharingItem.map { ShareItem(url: $0) } },

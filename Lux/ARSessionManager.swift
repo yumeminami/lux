@@ -30,7 +30,7 @@ class ARSessionManager: NSObject, ObservableObject {
     // 录制相关
     private var recordingStartTime: Date?
     private var currentSessionPath: URL?
-    private var csvText = "timestamp,frame_index,tx,ty,tz,rx,ry,rz\n"
+    private var mcapWriter: MCAPWriter?
     private var frameCount = 0
     private let fileQueue = DispatchQueue(label: "com.lux.fileQueue", qos: .utility)
 
@@ -64,42 +64,66 @@ class ARSessionManager: NSObject, ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
         let sessionName = "Session_\(formatter.string(from: Date()))"
-        
-        // 创建路径: Documents/Session_xxx/images
+
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         let sessionFolder = documents.appendingPathComponent(sessionName)
-        let imagesFolder = sessionFolder.appendingPathComponent("images")
-        
+        let mcapFile = sessionFolder.appendingPathComponent("recording.mcap")
+
         do {
-            try FileManager.default.createDirectory(at: imagesFolder, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: sessionFolder, withIntermediateDirectories: true)
             currentSessionPath = sessionFolder
+
+            // 创建MCAP writer
+            mcapWriter = try MCAPWriter(fileURL: mcapFile)
+
+            // 定义Schema (JSON格式)
+            let schemaJSON = """
+            {
+                "type": "object",
+                "properties": {
+                    "timestamp": {"type": "number"},
+                    "frame_index": {"type": "integer"},
+                    "position": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "z": {"type": "number"}
+                        }
+                    },
+                    "rotation": {
+                        "type": "object",
+                        "properties": {
+                            "roll": {"type": "number"},
+                            "pitch": {"type": "number"},
+                            "yaw": {"type": "number"}
+                        }
+                    },
+                    "image": {"type": "string", "description": "base64 encoded JPEG"}
+                }
+            }
+            """
+            mcapWriter?.writeSchema(name: "ARPose", encoding: "jsonschema", schemaData: schemaJSON.data(using: .utf8)!)
+            mcapWriter?.writeChannel(topic: "/ar/pose", messageEncoding: "json", schemaId: 1)
+
             recordingStartTime = Date()
             frameCount = 0
-            // 重置 CSV Header
-            csvText = "timestamp,frame_index,x,y,z,roll,pitch,yaw\n"
             isRecording = true
-            print("开始录制: \(sessionFolder.path)")
+            print("开始录制MCAP: \(mcapFile.path)")
         } catch {
-            print("创建录制目录失败: \(error)")
+            print("创建MCAP录制失败: \(error)")
         }
     }
     
     private func stopRecording() {
         isRecording = false
         recordDuration = 0
-        
-        // 保存 CSV
-        guard let path = currentSessionPath else { return }
-        let csvPath = path.appendingPathComponent("pose.csv")
-        
+
         fileQueue.async { [weak self] in
             guard let self = self else { return }
-            do {
-                try self.csvText.write(to: csvPath, atomically: true, encoding: .utf8)
-                print("CSV 保存成功")
-            } catch {
-                print("CSV 保存失败: \(error)")
-            }
+            self.mcapWriter?.close()
+            self.mcapWriter = nil
+            print("MCAP录制完成")
         }
     }
     
@@ -113,21 +137,21 @@ class ARSessionManager: NSObject, ObservableObject {
         return SIMD3<Float>(pitch, yaw, roll)
     }
 
-    // MARK: - 内部辅助函数：保存图片
-    private func savePixelBuffer(_ pixelBuffer: CVPixelBuffer, to url: URL) {
+    // MARK: - 内部辅助函数：将图片转换为base64
+    private func pixelBufferToBase64(_ pixelBuffer: CVPixelBuffer) -> String {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext()
-        
+
         if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) {
-            // 修复点：使用 ImageIO 常量并封装为 CIImageRepresentationOption
             let options: [CIImageRepresentationOption: Any] = [
-                CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.8
+                CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.5
             ]
-            
+
             if let jpegData = context.jpegRepresentation(of: ciImage, colorSpace: colorSpace, options: options) {
-                try? jpegData.write(to: url)
+                return jpegData.base64EncodedString()
             }
         }
+        return ""
     }
 }
 
@@ -170,26 +194,41 @@ extension ARSessionManager: ARSessionDelegate {
             }
         }
         
-        // 3. 录制数据
-        if isRecording, let sessionPath = currentSessionPath {
+        // 3. 录制数据到MCAP
+        if isRecording {
             let timestamp = frame.timestamp
             let currentFrameIndex = frameCount
             frameCount += 1
-            
+            let pixelBuffer = frame.capturedImage
+
             fileQueue.async { [weak self] in
                 guard let self = self else { return }
-                
-                // 追加 CSV
-                let line = String(format: "%.6f,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
-                                  timestamp, currentFrameIndex,
-                                  relPos.x, relPos.y, relPos.z,
-                                  relRot.x, relRot.y, relRot.z)
-                self.csvText.append(line)
-                
-                // 保存图片
-                let imageName = String(format: "frame_%05d.jpg", currentFrameIndex)
-                let imagePath = sessionPath.appendingPathComponent("images").appendingPathComponent(imageName)
-                self.savePixelBuffer(frame.capturedImage, to: imagePath)
+
+                // 将图片转换为JPEG base64
+                let imageBase64 = self.pixelBufferToBase64(pixelBuffer)
+
+                // 构建JSON消息
+                let message: [String: Any] = [
+                    "timestamp": timestamp,
+                    "frame_index": currentFrameIndex,
+                    "position": [
+                        "x": relPos.x,
+                        "y": relPos.y,
+                        "z": relPos.z
+                    ],
+                    "rotation": [
+                        "roll": relRot.x,
+                        "pitch": relRot.y,
+                        "yaw": relRot.z
+                    ],
+                    "image": imageBase64
+                ]
+
+                if let jsonData = try? JSONSerialization.data(withJSONObject: message) {
+                    // 时间戳转换为纳秒
+                    let timestampNanos = UInt64(timestamp * 1_000_000_000)
+                    self.mcapWriter?.writeMessage(timestamp: timestampNanos, channelId: 1, messageData: jsonData)
+                }
             }
         }
     }

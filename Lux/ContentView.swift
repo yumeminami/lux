@@ -11,7 +11,7 @@ import RealityKit
 
 struct ContentView: View {
     @State private var isFullScreen = false
-    
+
     var body: some View {
         TabView {
             HomeView(isFullScreen: $isFullScreen)
@@ -19,6 +19,11 @@ struct ContentView: View {
                     Label("监控", systemImage: "camera.viewfinder")
                 }
                 .toolbar(isFullScreen ? .hidden : .visible, for: .tabBar)
+
+            RecordingsListView()
+                .tabItem {
+                    Label("数据", systemImage: "folder.fill")
+                }
 
             SettingsView()
                 .tabItem {
